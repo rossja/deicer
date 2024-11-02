@@ -1,13 +1,15 @@
 [tool.poetry]
-name = "glacier-delete"
+name = "deicer"
 version = "0.1.0"
-description = ""
+description = "script to delete all archives from s3 Glacier Vaults and then the vaults themselves"
 authors = ["Jason Ross <algorythm@gmail.com>"]
 readme = "README.md"
+package-mode = false
 
 [tool.poetry.dependencies]
 python = "^3.12"
 boto3 = "^1.35.54"
+python-dotenv = "^1.0.1"
 
 
 [build-system]
