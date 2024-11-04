@@ -7,15 +7,40 @@ the vault itself.
 
 ## running
 
-this code uses poetry to manage dependencies. to run the script:
+this code uses poetry to manage dependencies. if you hate that, a requirements.txt
+file is also provided for you.
+
+to use poetry:
 
 1. set the proper env vars: `cp .env.example .env` and edit .env
 2. install the packages needed: `poetry install`
 3. start the venv: `poetry shell`
 4. run the script: `python3 deicer.py`
+5. you should see some debug information checking the auth configuration and then get a warning
+6. type `no` to quit, or type `yes` to run
 
-You should see some debug information checking the auth configuration
-and then get a warning: type `no` to quit, type `yes` to run:
+### command line options
+
+the script takes a number of parameters:
+
+* **Log File**: using `--log-file`
+* **Log Directory**: using `--log-dir`
+* **Debug mode**: set by using `--debug --yes`
+
+### examples
+
+* **Specify a custom log file**:  `python deicer.py --log-file=/path/to/custom.log`
+* **Specify a directory for logs (will create timestamped files)**:  `python deicer.py --log-dir=/path/to/logs`
+* **enable debug mode**:  `python deicer.py --debug --yes`
+
+
+### notes
+
+* The script will run for a potentially **verrrrry** long time depending on how much data you have (up to days), but will sleep 900 seconds in between checking for the status.
+* Once all archives are deleted, the script will attempt to delete the vault itself. **This will almost certainly fail the first time** because S3 Glacier won't allow recently changed vaults to be deleted. The script will continue trying with an increasing wait time until it is able to delete the vault.
+
+
+### example output
 
 ```shell
 ❯ python3 deicer.py
@@ -45,25 +70,3 @@ Deleted archive tqhO[REDACTED]a8Bg from vault Disk[REDACTED]AF0_1
 Deleted archive cYs2[REDACTED]6srA from vault Disk[REDACTED]AF0_1
 Deleted archive N2sC[REDACTED]shxg from vault Disk[REDACTED]AF0_1
 ...
-
-```
-
-The script will run for a potentially **verrrrry** long time depending on how much data you have (up to days), but will sleep 900 seconds in between checking for the status.
-
-Once all archives are deleted, the script will attempt to delete the vault itself.
-**This will almost certainly fail the first time** because S3 Glacier won't allow recently changed vaults to be deleted.
-The script will continue trying with an increasing wait time until it is able to delete the vault.
-
-## options
-
-the script takes a number of parameters:
-
-* **Log File**: using `--log-file`
-* **Log Directory**: using `--log-dir`
-* **Debug mode**: set by using `--debug --yes`
-
-## examples
-
-* **Specify a custom log file**:  `python deicer.py --log-file=/path/to/custom.log`
-* **Specify a directory for logs (will create timestamped files)**:  `python deicer.py --log-dir=/path/to/logs`
-* **enable debug mode**:  `python deicer.py --debug --yes`
