@@ -50,6 +50,9 @@ Deleted archive N2sC[REDACTED]shxg from vault Disk[REDACTED]AF0_1
 
 The script will run for a potentially **verrrrry** long time depending on how much data you have (up to days), but will sleep 900 seconds in between checking for the status.
 
+Once all archives are deleted, the script will attempt to delete the vault itself.
+**This will almost certainly fail the first time** because S3 Glacier won't allow recently changed vaults to be deleted.
+The script will continue trying with an increasing wait time until it is able to delete the vault.
 
 ## options
 
