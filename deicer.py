@@ -1,13 +1,22 @@
 import boto3
 import time
 import os
+import argparse
 from botocore.exceptions import ClientError
 import logging
 from dotenv import load_dotenv
 
 # Set up logging
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+
+def setup_logging(debug=False):
+    """Configure logging based on debug flag."""
+    log_level = logging.DEBUG if debug else logging.INFO
+    logging.basicConfig(
+        level=log_level,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s' if debug else '%(message)s'
+    )
 
 
 def load_aws_credentials():
@@ -60,7 +69,7 @@ class GlacierCleanup:
         """
         region_name = region_name or os.getenv(
             'AWS_DEFAULT_REGION', 'us-east-1')
-        logger.info(f"Initializing Glacier client in region: {region_name}")
+        logger.debug("Initializing Glacier client in region: %s", region_name)
 
         # Create session with explicit credential check
         credentials = {
@@ -73,9 +82,9 @@ class GlacierCleanup:
         session_token = os.getenv('AWS_SESSION_TOKEN')
         if session_token:
             credentials['aws_session_token'] = session_token
-            logger.info("Using temporary credentials (session token present)")
+            logger.debug("Using temporary credentials (session token present)")
         else:
-            logger.info("Using permanent credentials (no session token)")
+            logger.debug("Using permanent credentials (no session token)")
 
         session = boto3.Session(**credentials)
 
@@ -112,14 +121,24 @@ class GlacierCleanup:
     def get_job_output(self, vault_name, job_id):
         """Get the output of a completed inventory retrieval job."""
         try:
+            import json
             response = self.glacier.get_job_output(
                 vaultName=vault_name,
                 jobId=job_id
             )
-            return response['body'].read()
+            # Read the response body and decode it as JSON
+            body_bytes = response['body'].read()
+            inventory_json = json.loads(body_bytes.decode('utf-8'))
+            logger.info(f"Retrieved inventory for vault {vault_name}")
+            return inventory_json
         except ClientError as e:
             logger.error(f"Error getting job output for vault {
                          vault_name}: {e}")
+            raise
+        except json.JSONDecodeError as e:
+            logger.error(f"Error decoding inventory JSON for vault {
+                         vault_name}: {e}")
+            logger.debug(f"Raw response: {body_bytes}")
             raise
 
     def wait_for_job_completion(self, vault_name, job_id, check_interval=900):
@@ -183,7 +202,18 @@ class GlacierCleanup:
 
                 # Get inventory
                 inventory = self.get_job_output(vault_name, job_id)
-                archives = inventory.get('ArchiveList', [])
+                logger.info(f"Processing inventory for vault {vault_name}")
+
+                # The inventory structure should contain an ArchiveList
+                if 'ArchiveList' not in inventory:
+                    logger.error(
+                        f"Unexpected inventory format for vault {vault_name}")
+                    logger.debug(f"Inventory contents: {inventory}")
+                    continue
+
+                archives = inventory['ArchiveList']
+                logger.info(
+                    f"Found {len(archives)} archives in vault {vault_name}")
 
                 # Delete all archives
                 for archive in archives:
@@ -200,6 +230,18 @@ class GlacierCleanup:
 def main():
     """Main execution function."""
     try:
+        # Parse command line arguments
+        parser = argparse.ArgumentParser(
+            description='AWS Glacier Vault Cleanup Tool')
+        parser.add_argument('--debug', action='store_true',
+                            help='Enable debug logging')
+        parser.add_argument('--yes', '-y', action='store_true',
+                            help='Skip confirmation prompt')
+        args = parser.parse_args()
+
+        # Setup logging based on debug flag
+        setup_logging(args.debug)
+
         # Check for AWS credentials
         if not load_aws_credentials():
             return
@@ -208,18 +250,21 @@ def main():
         cleanup = GlacierCleanup()
 
         # Confirm with user before proceeding
-        response = input(
-            "This will delete ALL vaults and their contents. Are you sure? (yes/no): ")
-        if response.lower() != 'yes':
-            logger.info("Operation cancelled by user")
-            return
+        if not args.yes:
+            response = input(
+                "This will delete ALL vaults and their contents. Are you sure? (yes/no): ")
+            if response.lower() != 'yes':
+                logger.info("Operation cancelled by user")
+                return
 
         # Proceed with cleanup
         cleanup.cleanup_all_vaults()
         logger.info("Cleanup completed successfully")
 
     except Exception as e:
-        logger.error(f"An error occurred during cleanup: {e}")
+        logger.error("An error occurred during cleanup: %s", str(e))
+        if args.debug:
+            logger.exception("Detailed error information:")
         raise
 
 
