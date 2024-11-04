@@ -5,21 +5,26 @@
 Python script to delete all archives from an s3 Glacier Vault and then
 the vault itself.
 
-## running
+## install dependencies
 
 this code uses poetry to manage dependencies. if you hate that, a requirements.txt
 file is also provided for you.
 
-to use poetry:
+### using poetry
 
 1. set the proper env vars: `cp .env.example .env` and edit .env
 2. install the packages needed: `poetry install`
 3. start the venv: `poetry shell`
-4. run the script: `python3 deicer.py`
-5. you should see some debug information checking the auth configuration and then get a warning
-6. type `no` to quit, or type `yes` to run
 
-### command line options
+
+## running the script
+
+1. run the script: `python3 deicer.py`
+2. you should see some debug information checking the auth configuration and then get a warning
+3. type `no` to quit, or type `yes` to run
+4. wait. then keep waiting. because glacier. *(see notes for details)*
+
+## command line options
 
 the script takes a number of parameters:
 
@@ -34,7 +39,7 @@ the script takes a number of parameters:
 * **enable debug mode**:  `python deicer.py --debug --yes`
 
 
-### notes
+## notes
 
 * The script will run for a potentially **verrrrry** long time depending on how much data you have (up to days), but will sleep 900 seconds in between checking for the status.
 * Once all archives are deleted, the script will attempt to delete the vault itself. **This will almost certainly fail the first time** because S3 Glacier won't allow recently changed vaults to be deleted. The script will continue trying with an increasing wait time until it is able to delete the vault.
