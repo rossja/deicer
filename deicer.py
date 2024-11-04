@@ -10,13 +10,51 @@ from dotenv import load_dotenv
 logger = logging.getLogger(__name__)
 
 
-def setup_logging(debug=False):
-    """Configure logging based on debug flag."""
+def setup_logging(debug=False, log_file=None):
+    """
+    Configure logging to output to both file and console.
+
+    Args:
+        debug (bool): Whether to enable debug logging
+        log_file (str): Path to log file. If None, generates a timestamped file name
+    """
     log_level = logging.DEBUG if debug else logging.INFO
-    logging.basicConfig(
-        level=log_level,
-        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s' if debug else '%(message)s'
-    )
+
+    # Create formatters
+    console_formatter = logging.Formatter('%(message)s')
+    file_formatter = logging.Formatter(
+        '%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+
+    # Set up the root logger
+    root_logger = logging.getLogger()
+    root_logger.setLevel(log_level)
+
+    # Clear any existing handlers
+    root_logger.handlers = []
+
+    # Console handler
+    console_handler = logging.StreamHandler()
+    console_handler.setFormatter(console_formatter)
+    console_handler.setLevel(log_level)
+    root_logger.addHandler(console_handler)
+
+    # File handler
+    if log_file is None:
+        # Generate default log file name with timestamp
+        timestamp = time.strftime('%Y%m%d-%H%M%S')
+        log_file = f'glacier_cleanup_{timestamp}.log'
+
+    # Ensure log directory exists
+    log_dir = os.path.dirname(log_file)
+    if log_dir and not os.path.exists(log_dir):
+        os.makedirs(log_dir)
+
+    file_handler = logging.FileHandler(log_file)
+    file_handler.setFormatter(file_formatter)
+    file_handler.setLevel(log_level)
+    root_logger.addHandler(file_handler)
+
+    logger.debug("Logging initialized: console and file (%s)", log_file)
 
 
 def load_aws_credentials():
@@ -173,53 +211,86 @@ class GlacierCleanup:
                          archive_id} from vault {vault_name}: {e}")
             raise
 
-    def delete_vault(self, vault_name):
-        """Delete an empty vault."""
-        try:
-            self.glacier.delete_vault(vaultName=vault_name)
-            logger.info(f"Deleted vault {vault_name}")
-        except ClientError as e:
-            logger.error(f"Error deleting vault {vault_name}: {e}")
-            raise
+    def delete_vault(self, vault_name, max_retries=5, initial_wait=300):
+        """
+        Delete an empty vault with retries.
+
+        Args:
+            vault_name: Name of the vault to delete
+            max_retries: Maximum number of deletion attempts
+            initial_wait: Initial wait time in seconds between archive deletion and first vault deletion attempt
+        """
+        logger.info(
+            "Waiting %d seconds for vault %s to be ready for deletion...", initial_wait, vault_name)
+        time.sleep(initial_wait)  # Initial wait after archive deletions
+
+        for attempt in range(max_retries):
+            try:
+                self.glacier.delete_vault(vaultName=vault_name)
+                logger.info("Successfully deleted vault %s", vault_name)
+                return True
+            except ClientError as e:
+                if e.response['Error']['Code'] == 'InvalidParameterValueException' and 'Vault not empty' in str(e):
+                    # Exponential backoff
+                    wait_time = (attempt + 1) * initial_wait
+                    if attempt < max_retries - 1:  # Don't wait after the last attempt
+                        logger.info("Vault %s not ready for deletion. Waiting %d seconds before retry %d/%d...",
+                                    vault_name, wait_time, attempt + 1, max_retries)
+                        time.sleep(wait_time)
+                    else:
+                        logger.error(
+                            "Failed to delete vault %s after %d attempts", vault_name, max_retries)
+                        raise
+                else:
+                    logger.error("Error deleting vault %s: %s",
+                                 vault_name, str(e))
+                    raise
 
     def cleanup_all_vaults(self):
         """Main function to clean up all vaults and their archives."""
         vaults = self.list_vaults()
-        logger.info(f"Found {len(vaults)} vaults")
+        logger.info("Found %d vaults", len(vaults))
 
         for vault in vaults:
             vault_name = vault['VaultName']
-            logger.info(f"Processing vault: {vault_name}")
+            logger.info("Processing vault: %s", vault_name)
 
             try:
                 # Initiate inventory retrieval
                 job_id = self.initiate_inventory_retrieval(vault_name)
-                logger.info(f"Initiated inventory retrieval job {
-                            job_id} for vault {vault_name}")
+                logger.info(
+                    "Initiated inventory retrieval job %s for vault %s", job_id, vault_name)
 
                 # Wait for job completion
                 self.wait_for_job_completion(vault_name, job_id)
 
                 # Get inventory
                 inventory = self.get_job_output(vault_name, job_id)
-                logger.info(f"Processing inventory for vault {vault_name}")
+                logger.info("Processing inventory for vault %s", vault_name)
 
                 # The inventory structure should contain an ArchiveList
                 if 'ArchiveList' not in inventory:
                     logger.error(
-                        f"Unexpected inventory format for vault {vault_name}")
-                    logger.debug(f"Inventory contents: {inventory}")
+                        "Unexpected inventory format for vault %s", vault_name)
+                    logger.debug("Inventory contents: %s", inventory)
                     continue
 
                 archives = inventory['ArchiveList']
-                logger.info(
-                    f"Found {len(archives)} archives in vault {vault_name}")
+                logger.info("Found %d archives in vault %s",
+                            len(archives), vault_name)
 
                 # Delete all archives
                 for archive in archives:
                     self.delete_archive(vault_name, archive['ArchiveId'])
 
-                # Delete the empty vault
+                if archives:
+                    logger.info(
+                        "All archives deleted from vault %s. Proceeding with vault deletion.", vault_name)
+                else:
+                    logger.info(
+                        "No archives found in vault %s. Proceeding with vault deletion.", vault_name)
+
+                # Delete the empty vault with retries
                 self.delete_vault(vault_name)
 
             except Exception as e:
@@ -237,10 +308,24 @@ def main():
                             help='Enable debug logging')
         parser.add_argument('--yes', '-y', action='store_true',
                             help='Skip confirmation prompt')
+        parser.add_argument('--log-file',
+                            help='Path to log file (default: glacier_cleanup_TIMESTAMP.log)')
+        parser.add_argument('--log-dir',
+                            help='Directory to store log files (default: current directory)')
         args = parser.parse_args()
 
+        # Determine log file path
+        log_file = args.log_file
+        if args.log_dir and not args.log_file:
+            timestamp = time.strftime('%Y%m%d-%H%M%S')
+            log_file = os.path.join(
+                args.log_dir, f'glacier_cleanup_{timestamp}.log')
+
         # Setup logging based on debug flag
-        setup_logging(args.debug)
+        setup_logging(args.debug, log_file)
+
+        # Log start of execution with script version or other relevant info
+        logger.info("Starting AWS Glacier cleanup")
 
         # Check for AWS credentials
         if not load_aws_credentials():

@@ -15,8 +15,7 @@ this code uses poetry to manage dependencies. to run the script:
 4. run the script: `python3 deicer.py`
 
 You should see some debug information checking the auth configuration
-and then get a warning: type `no` to quit or just hit enter to accept
-the default `yes`:
+and then get a warning: type `no` to quit, type `yes` to run:
 
 ```shell
 ❯ python3 deicer.py
@@ -50,3 +49,23 @@ Deleted archive N2sC[REDACTED]shxg from vault Disk[REDACTED]AF0_1
 ```
 
 The script will run for a potentially **verrrrry** long time depending on how much data you have (up to days), but will sleep 900 seconds in between checking for the status.
+
+
+## options
+
+the script takes a number of parameters:
+
+* **Log File**: using `--log-file`
+* **Log Directory**: using `--log-dir`
+* **Debug mode**: set by using `--debug --yes`
+
+## examples
+
+# Specify a custom log file
+`python deicer.py --log-file=/path/to/custom.log`
+
+# Specify a directory for logs (will create timestamped files)
+`python deicer.py --log-dir=/path/to/logs`
+
+# enable debug mode
+`python deicer.py --debug --yes`
