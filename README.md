@@ -20,23 +20,33 @@ the default `yes`:
 
 ```shell
 ❯ python3 deicer.py
-INFO:__main__:Starting credential validation...
-INFO:__main__:Loading .env file
-INFO:__main__:AWS_ACCESS_KEY_ID is set (length: 20)
-INFO:__main__:AWS_ACCESS_KEY_ID preview: AKIA...EFEF
-INFO:__main__:AWS_SECRET_ACCESS_KEY is set (length: 40)
-INFO:__main__:AWS_SECRET_ACCESS_KEY preview: kd2...hbc
-INFO:__main__:AWS_SESSION_TOKEN is not set
-INFO:__main__:AWS_DEFAULT_REGION is set (length: 9)
-INFO:__main__:AWS_DEFAULT_REGION preview: us-e...st-1
-INFO:__main__:Optional variable AWS_SESSION_TOKEN not set
-INFO:__main__:Initializing Glacier client in region: us-east-1
-INFO:__main__:Using permanent credentials (no session token)
+Starting credential validation...
+Loading .env file
+AWS_ACCESS_KEY_ID is set (length: 20)
+AWS_ACCESS_KEY_ID preview: AK[REDACTED]EO
+AWS_SECRET_ACCESS_KEY is set (length: 40)
+AWS_SECRET_ACCESS_KEY preview: jw[REDACTED]M9
+AWS_SESSION_TOKEN is not set
+AWS_DEFAULT_REGION is set (length: 9)
+AWS_DEFAULT_REGION preview: us-e...st-1
+Optional variable AWS_SESSION_TOKEN not set
 This will delete ALL vaults and their contents. Are you sure? (yes/no): yes
-INFO:__main__:Found 3 vaults
-INFO:__main__:Processing vault: Dis...F0_1
-INFO:__main__:Initiated inventory retrieval job oJZf...yeTh for vault Dis...F0_1
-INFO:__main__:Job still in progress for vault Dis...F0_1. Waiting 900 seconds...
+Found 3 vaults
+Processing vault: Disk[REDACTED]AF0_1
+Initiated inventory retrieval job C4j3[REDACTED]1sUo-X for vault Disk[REDACTED]AF0_1
+Job still in progress for vault Disk[REDACTED]AF0_1. Waiting 900 seconds...
+Job still in progress for vault Disk[REDACTED]AF0_1. Waiting 900 seconds...
+...
+Job still in progress for vault Disk[REDACTED]AF0_1. Waiting 900 seconds...
+Job still in progress for vault Disk[REDACTED]AF0_1. Waiting 900 seconds...
+Retrieved inventory for vault Disk[REDACTED]AF0_1
+Processing inventory for vault Disk[REDACTED]AF0_1
+Found 103639 archives in vault Disk[REDACTED]AF0_1
+Deleted archive tqhO[REDACTED]a8Bg from vault Disk[REDACTED]AF0_1
+Deleted archive cYs2[REDACTED]6srA from vault Disk[REDACTED]AF0_1
+Deleted archive N2sC[REDACTED]shxg from vault Disk[REDACTED]AF0_1
+...
+
 ```
 
 The script will run for a potentially **verrrrry** long time depending on how much data you have (up to days), but will sleep 900 seconds in between checking for the status.
