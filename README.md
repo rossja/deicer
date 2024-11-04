@@ -44,7 +44,8 @@ the script takes a number of parameters:
 * The script will run for a potentially **verrrrry** long time depending on how much data you have (up to days), but will sleep 900 seconds in between checking for the status.
 * Once all archives are deleted, the script will attempt to delete the vault itself.
   * **The vault delete attempt will almost certainly fail the first time!**
-  * This is because S3 Glacier won't allow recently changed vaults to be deleted. The script will continue trying with an increasing wait time until it is able to delete the vault.
+  * This is because S3 Glacier won't allow recently changed vaults to be deleted.
+  * The script will continue trying with an increasing wait time until it is able to delete the vault.
 
 
 ### example output
