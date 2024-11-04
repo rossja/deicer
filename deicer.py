@@ -1,7 +1,9 @@
 import boto3
 import time
 import os
+import json
 import argparse
+from datetime import datetime, timezone
 from botocore.exceptions import ClientError
 import logging
 from dotenv import load_dotenv
@@ -11,13 +13,7 @@ logger = logging.getLogger(__name__)
 
 
 def setup_logging(debug=False, log_file=None):
-    """
-    Configure logging to output to both file and console.
-
-    Args:
-        debug (bool): Whether to enable debug logging
-        log_file (str): Path to log file. If None, generates a timestamped file name
-    """
+    """Configure logging to output to both file and console."""
     log_level = logging.DEBUG if debug else logging.INFO
 
     # Create formatters
@@ -28,8 +24,6 @@ def setup_logging(debug=False, log_file=None):
     # Set up the root logger
     root_logger = logging.getLogger()
     root_logger.setLevel(log_level)
-
-    # Clear any existing handlers
     root_logger.handlers = []
 
     # Console handler
@@ -40,11 +34,9 @@ def setup_logging(debug=False, log_file=None):
 
     # File handler
     if log_file is None:
-        # Generate default log file name with timestamp
         timestamp = time.strftime('%Y%m%d-%H%M%S')
         log_file = f'glacier_cleanup_{timestamp}.log'
 
-    # Ensure log directory exists
     log_dir = os.path.dirname(log_file)
     if log_dir and not os.path.exists(log_dir):
         os.makedirs(log_dir)
@@ -62,12 +54,13 @@ def load_aws_credentials():
     Load AWS credentials from environment variables or .env file.
     Returns True if credentials are found, False otherwise.
     """
-    logger.info("Starting credential validation...")
     # Try to load .env file if it exists
     env_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), '.env')
     if os.path.exists(env_file):
-        logger.info("Loading .env file")
+        logger.debug("Loading .env file from: %s", env_file)
         load_dotenv(env_file)
+    else:
+        logger.debug("No .env file found at: %s", env_file)
 
     # Check for required AWS credentials
     required_vars = ['AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY']
@@ -77,277 +70,290 @@ def load_aws_credentials():
     for var in required_vars + optional_vars:
         value = os.getenv(var)
         if value:
-            logger.info(f"{var} is set (length: {len(value)})")
+            logger.debug("%s is set (length: %d)", var, len(value))
             # Show first 4 and last 4 characters if value is long enough
             if len(value) > 8:
-                logger.info(f"{var} preview: {value[:4]}...{value[-4:]}")
+                logger.debug("%s preview: %s...%s", var, value[:4], value[-4:])
         else:
-            logger.info(f"{var} is not set")
+            logger.debug("%s is not set", var)
 
     # Check required variables
     missing_vars = [var for var in required_vars if not os.getenv(var)]
     if missing_vars:
-        logger.error(f"Missing required AWS credentials: {
-                     ', '.join(missing_vars)}")
+        logger.error("Missing required AWS credentials: %s",
+                     ', '.join(missing_vars))
         logger.error("Please set them in your environment or .env file")
         return False
 
-    # Log status of optional variables
-    for var in optional_vars:
-        if not os.getenv(var):
-            logger.info(f"Optional variable {var} not set")
-
+    logger.debug("AWS credentials validation completed successfully")
     return True
 
 
+class GlacierStateManager:
+    """Manages the state of Glacier vault deletion process."""
+
+    def __init__(self, state_file):
+        """Initialize with path to state file."""
+        self.state_file = state_file
+        self.state = self.load_state()
+
+    def load_state(self):
+        """Load state from file or create new if doesn't exist."""
+        if os.path.exists(self.state_file):
+            try:
+                with open(self.state_file, 'r') as f:
+                    return json.load(f)
+            except json.JSONDecodeError:
+                logger.error("Error reading state file. Creating new state.")
+                return {}
+        return {}
+
+    def save_state(self):
+        """Save current state to file."""
+        with open(self.state_file, 'w') as f:
+            json.dump(self.state, f, indent=2)
+        logger.debug("State saved to %s", self.state_file)
+
+    def add_vault(self, vault_id):
+        """Add a new vault to track."""
+        if vault_id not in self.state:
+            self.state[vault_id] = {
+                "job_id": None,
+                "status": None,
+                "job_updated": None,
+                "archives": []
+            }
+            self.save_state()
+
+    def update_vault_job(self, vault_id, job_id, status):
+        """Update job information for a vault."""
+        if vault_id in self.state:
+            self.state[vault_id]["job_id"] = job_id
+            self.state[vault_id]["status"] = status
+            self.state[vault_id]["job_updated"] = datetime.now(
+                timezone.utc).isoformat()
+            self.save_state()
+
+    def update_vault_archives(self, vault_id, archives):
+        """Update archive list for a vault."""
+        if vault_id in self.state:
+            self.state[vault_id]["archives"] = archives
+            self.save_state()
+
+
 class GlacierCleanup:
-    def __init__(self, region_name=None):
-        """
-        Initialize Glacier client with specified region or default from environment.
-        """
+    def __init__(self, state_manager, region_name=None):
+        """Initialize Glacier client with state manager."""
         region_name = region_name or os.getenv(
             'AWS_DEFAULT_REGION', 'us-east-1')
-        logger.debug("Initializing Glacier client in region: %s", region_name)
+        self.state_manager = state_manager
 
-        # Create session with explicit credential check
-        credentials = {
-            'aws_access_key_id': os.getenv('AWS_ACCESS_KEY_ID'),
-            'aws_secret_access_key': os.getenv('AWS_SECRET_ACCESS_KEY'),
-            'region_name': region_name
-        }
-
-        # Only add session token if it's present
-        session_token = os.getenv('AWS_SESSION_TOKEN')
-        if session_token:
-            credentials['aws_session_token'] = session_token
-            logger.debug("Using temporary credentials (session token present)")
-        else:
-            logger.debug("Using permanent credentials (no session token)")
-
-        session = boto3.Session(**credentials)
+        session = boto3.Session(
+            aws_access_key_id=os.getenv('AWS_ACCESS_KEY_ID'),
+            aws_secret_access_key=os.getenv('AWS_SECRET_ACCESS_KEY'),
+            aws_session_token=os.getenv('AWS_SESSION_TOKEN'),
+            region_name=region_name
+        )
 
         self.glacier = session.client('glacier')
+        logger.debug("Initialized Glacier client in region: %s", region_name)
 
     def list_vaults(self):
-        """List all Glacier vaults in the account."""
+        """List and record all Glacier vaults."""
         try:
             vaults = []
             paginator = self.glacier.get_paginator('list_vaults')
 
             for page in paginator.paginate():
-                vaults.extend(page.get('VaultList', []))
+                for vault in page.get('VaultList', []):
+                    vault_name = vault['VaultName']
+                    self.state_manager.add_vault(vault_name)
+                    vaults.append(vault_name)
 
+            logger.info("Found %d vaults", len(vaults))
             return vaults
         except ClientError as e:
-            logger.error(f"Error listing vaults: {e}")
+            logger.error("Error listing vaults: %s", str(e))
             raise
 
-    def initiate_inventory_retrieval(self, vault_name):
-        """Initiate an inventory retrieval job for a vault."""
-        try:
-            job_params = {'Type': 'inventory-retrieval'}
-            response = self.glacier.initiate_job(
-                vaultName=vault_name,
-                jobParameters=job_params
-            )
-            return response['jobId']
-        except ClientError as e:
-            logger.error(f"Error initiating inventory retrieval for vault {
-                         vault_name}: {e}")
-            raise
+    def initiate_inventory_jobs(self):
+        """Start inventory jobs for vaults without active jobs."""
+        for vault_id, vault_data in self.state_manager.state.items():
+            if not vault_data["job_id"] or vault_data["status"] in ["error", "complete"]:
+                try:
+                    response = self.glacier.initiate_job(
+                        vaultName=vault_id,
+                        jobParameters={'Type': 'inventory-retrieval'}
+                    )
+                    job_id = response['jobId']
+                    self.state_manager.update_vault_job(
+                        vault_id, job_id, "in-progress")
+                    logger.info(
+                        "Initiated inventory job %s for vault %s", job_id, vault_id)
+                except ClientError as e:
+                    logger.error(
+                        "Error initiating job for vault %s: %s", vault_id, str(e))
+                    self.state_manager.update_vault_job(
+                        vault_id, None, "error")
 
-    def get_job_output(self, vault_name, job_id):
-        """Get the output of a completed inventory retrieval job."""
+    def check_job_status(self):
+        """Check status of all in-progress jobs."""
+        jobs_checked = 0
+        for vault_id, vault_data in self.state_manager.state.items():
+            if vault_data["status"] == "in-progress" and vault_data["job_id"]:
+                try:
+                    response = self.glacier.describe_job(
+                        vaultName=vault_id,
+                        jobId=vault_data["job_id"]
+                    )
+                    jobs_checked += 1
+
+                    # Update the job timestamp even if not complete
+                    self.state_manager.update_vault_job(
+                        vault_id, vault_data["job_id"], "in-progress")
+
+                    logger.info("Checking job %s for vault %s: %s",
+                                vault_data["job_id"],
+                                vault_id,
+                                "COMPLETED" if response['Completed'] else "IN PROGRESS")
+
+                    if response['Completed']:
+                        self.get_job_output(vault_id, vault_data["job_id"])
+                except ClientError as e:
+                    logger.error("Error checking job %s for vault %s: %s",
+                                 vault_data["job_id"], vault_id, str(e))
+                    self.state_manager.update_vault_job(
+                        vault_id, vault_data["job_id"], "error")
+
+        if jobs_checked == 0:
+            logger.info("No in-progress jobs to check")
+
+    def get_job_output(self, vault_id, job_id):
+        """Get and store output from completed inventory job."""
         try:
-            import json
             response = self.glacier.get_job_output(
-                vaultName=vault_name,
+                vaultName=vault_id,
                 jobId=job_id
             )
-            # Read the response body and decode it as JSON
-            body_bytes = response['body'].read()
-            inventory_json = json.loads(body_bytes.decode('utf-8'))
-            logger.info(f"Retrieved inventory for vault {vault_name}")
-            return inventory_json
+            inventory = json.loads(response['body'].read())
+            archives = [
+                {
+                    'id': archive['ArchiveId'],
+                    'description': archive.get('ArchiveDescription', ''),
+                    'size': archive['Size']
+                }
+                for archive in inventory.get('ArchiveList', [])
+            ]
+            self.state_manager.update_vault_archives(vault_id, archives)
+            self.state_manager.update_vault_job(vault_id, job_id, "complete")
+            logger.info("Retrieved %d archives for vault %s",
+                        len(archives), vault_id)
         except ClientError as e:
-            logger.error(f"Error getting job output for vault {
-                         vault_name}: {e}")
-            raise
-        except json.JSONDecodeError as e:
-            logger.error(f"Error decoding inventory JSON for vault {
-                         vault_name}: {e}")
-            logger.debug(f"Raw response: {body_bytes}")
-            raise
+            logger.error(
+                "Error getting job output for vault %s: %s", vault_id, str(e))
+            self.state_manager.update_vault_job(vault_id, job_id, "error")
 
-    def wait_for_job_completion(self, vault_name, job_id, check_interval=900):
-        """Wait for an inventory job to complete."""
-        while True:
-            try:
-                response = self.glacier.describe_job(
-                    vaultName=vault_name,
-                    jobId=job_id
-                )
-                if response['Completed']:
-                    return True
-                logger.info(f"Job still in progress for vault {
-                            vault_name}. Waiting {check_interval} seconds...")
-                time.sleep(check_interval)
-            except ClientError as e:
-                logger.error(f"Error checking job status for vault {
-                             vault_name}: {e}")
-                raise
+    def process_completed_jobs(self):
+        """Process vaults with completed inventory jobs older than 24 hours."""
+        current_time = datetime.now(timezone.utc)
 
-    def delete_archive(self, vault_name, archive_id):
-        """Delete a single archive from a vault."""
+        for vault_id, vault_data in self.state_manager.state.items():
+            if vault_data["status"] == "complete" and vault_data["job_updated"]:
+                job_time = datetime.fromisoformat(vault_data["job_updated"])
+                hours_elapsed = (
+                    current_time - job_time).total_seconds() / 3600
+
+                if hours_elapsed >= 24:
+                    logger.info(
+                        "Processing vault %s (%.1f hours elapsed)", vault_id, hours_elapsed)
+                    self.delete_vault_contents(
+                        vault_id, vault_data["archives"])
+
+    def delete_vault_contents(self, vault_id, archives):
+        """Delete archives and attempt vault deletion."""
         try:
-            self.glacier.delete_archive(
-                vaultName=vault_name,
-                archiveId=archive_id
-            )
-            logger.info(f"Deleted archive {
-                        archive_id} from vault {vault_name}")
-        except ClientError as e:
-            logger.error(f"Error deleting archive {
-                         archive_id} from vault {vault_name}: {e}")
-            raise
+            for archive in archives:
+                try:
+                    self.glacier.delete_archive(
+                        vaultName=vault_id,
+                        archiveId=archive['id']
+                    )
+                    logger.info("Deleted archive %s from vault %s",
+                                archive['id'], vault_id)
+                except ClientError as e:
+                    logger.error("Error deleting archive %s: %s",
+                                 archive['id'], str(e))
 
-    def delete_vault(self, vault_name, max_retries=5, initial_wait=300):
-        """
-        Delete an empty vault with retries.
+            # After deleting archives, mark the vault for future deletion
+            self.state_manager.update_vault_job(
+                vault_id, None, "pending_deletion")
+            logger.info("Marked vault %s for deletion", vault_id)
 
-        Args:
-            vault_name: Name of the vault to delete
-            max_retries: Maximum number of deletion attempts
-            initial_wait: Initial wait time in seconds between archive deletion and first vault deletion attempt
-        """
-        logger.info(
-            "Waiting %d seconds for vault %s to be ready for deletion...", initial_wait, vault_name)
-        time.sleep(initial_wait)  # Initial wait after archive deletions
-
-        for attempt in range(max_retries):
-            try:
-                self.glacier.delete_vault(vaultName=vault_name)
-                logger.info("Successfully deleted vault %s", vault_name)
-                return True
-            except ClientError as e:
-                if e.response['Error']['Code'] == 'InvalidParameterValueException' and 'Vault not empty' in str(e):
-                    # Exponential backoff
-                    wait_time = (attempt + 1) * initial_wait
-                    if attempt < max_retries - 1:  # Don't wait after the last attempt
-                        logger.info("Vault %s not ready for deletion. Waiting %d seconds before retry %d/%d...",
-                                    vault_name, wait_time, attempt + 1, max_retries)
-                        time.sleep(wait_time)
-                    else:
-                        logger.error(
-                            "Failed to delete vault %s after %d attempts", vault_name, max_retries)
-                        raise
-                else:
-                    logger.error("Error deleting vault %s: %s",
-                                 vault_name, str(e))
-                    raise
-
-    def cleanup_all_vaults(self):
-        """Main function to clean up all vaults and their archives."""
-        vaults = self.list_vaults()
-        logger.info("Found %d vaults", len(vaults))
-
-        for vault in vaults:
-            vault_name = vault['VaultName']
-            logger.info("Processing vault: %s", vault_name)
-
-            try:
-                # Initiate inventory retrieval
-                job_id = self.initiate_inventory_retrieval(vault_name)
-                logger.info(
-                    "Initiated inventory retrieval job %s for vault %s", job_id, vault_name)
-
-                # Wait for job completion
-                self.wait_for_job_completion(vault_name, job_id)
-
-                # Get inventory
-                inventory = self.get_job_output(vault_name, job_id)
-                logger.info("Processing inventory for vault %s", vault_name)
-
-                # The inventory structure should contain an ArchiveList
-                if 'ArchiveList' not in inventory:
-                    logger.error(
-                        "Unexpected inventory format for vault %s", vault_name)
-                    logger.debug("Inventory contents: %s", inventory)
-                    continue
-
-                archives = inventory['ArchiveList']
-                logger.info("Found %d archives in vault %s",
-                            len(archives), vault_name)
-
-                # Delete all archives
-                for archive in archives:
-                    self.delete_archive(vault_name, archive['ArchiveId'])
-
-                if archives:
-                    logger.info(
-                        "All archives deleted from vault %s. Proceeding with vault deletion.", vault_name)
-                else:
-                    logger.info(
-                        "No archives found in vault %s. Proceeding with vault deletion.", vault_name)
-
-                # Delete the empty vault with retries
-                self.delete_vault(vault_name)
-
-            except Exception as e:
-                logger.error(f"Error processing vault {vault_name}: {e}")
-                continue
+        except Exception as e:
+            logger.error("Error processing vault %s: %s", vault_id, str(e))
 
 
 def main():
     """Main execution function."""
+    parser = argparse.ArgumentParser(
+        description='AWS Glacier Vault Cleanup Tool')
+    parser.add_argument('--debug', action='store_true',
+                        help='Enable debug logging')
+    parser.add_argument('--log-file', help='Path to log file')
+    parser.add_argument('--state-file', default='glacier_state.json',
+                        help='Path to state file (default: glacier_state.json)')
+    parser.add_argument('--scan', action='store_true',
+                        help='Scan for new vaults and initiate inventory jobs')
+    parser.add_argument('--status', action='store_true',
+                        help='Show current status of all vaults and jobs')
+    args = parser.parse_args()
+
     try:
-        # Parse command line arguments
-        parser = argparse.ArgumentParser(
-            description='AWS Glacier Vault Cleanup Tool')
-        parser.add_argument('--debug', action='store_true',
-                            help='Enable debug logging')
-        parser.add_argument('--yes', '-y', action='store_true',
-                            help='Skip confirmation prompt')
-        parser.add_argument('--log-file',
-                            help='Path to log file (default: glacier_cleanup_TIMESTAMP.log)')
-        parser.add_argument('--log-dir',
-                            help='Directory to store log files (default: current directory)')
-        args = parser.parse_args()
+        # Setup logging
+        setup_logging(args.debug, args.log_file)
 
-        # Determine log file path
-        log_file = args.log_file
-        if args.log_dir and not args.log_file:
-            timestamp = time.strftime('%Y%m%d-%H%M%S')
-            log_file = os.path.join(
-                args.log_dir, f'glacier_cleanup_{timestamp}.log')
-
-        # Setup logging based on debug flag
-        setup_logging(args.debug, log_file)
-
-        # Log start of execution with script version or other relevant info
-        logger.info("Starting AWS Glacier cleanup")
-
-        # Check for AWS credentials
+        # Load AWS credentials
         if not load_aws_credentials():
-            return
+            logger.error("Failed to load AWS credentials")
+            return 1
 
-        # Initialize the cleanup class
-        cleanup = GlacierCleanup()
+        # Initialize state manager and cleanup
+        state_manager = GlacierStateManager(args.state_file)
+        cleanup = GlacierCleanup(state_manager)
 
-        # Confirm with user before proceeding
-        if not args.yes:
-            response = input(
-                "This will delete ALL vaults and their contents. Are you sure? (yes/no): ")
-            if response.lower() != 'yes':
-                logger.info("Operation cancelled by user")
-                return
+        # If scan flag is set, scan for new vaults
+        if args.scan:
+            cleanup.list_vaults()
+            cleanup.initiate_inventory_jobs()
 
-        # Proceed with cleanup
-        cleanup.cleanup_all_vaults()
-        logger.info("Cleanup completed successfully")
+        # Always check existing jobs and process completed ones
+        cleanup.check_job_status()
+        cleanup.process_completed_jobs()
+
+        # Show status if requested
+        if args.status:
+            logger.info("\nCurrent Status:")
+            for vault_id, vault_data in state_manager.state.items():
+                status = vault_data["status"] or "not started"
+                job_id = vault_data["job_id"] or "no job"
+                updated = vault_data["job_updated"] or "never"
+                if updated != "never":
+                    # Convert UTC timestamp to local time for display
+                    updated_dt = datetime.fromisoformat(
+                        updated).replace(tzinfo=timezone.utc)
+                    updated = updated_dt.astimezone().strftime('%Y-%m-%d %H:%M:%S %Z')
+                archive_count = len(vault_data.get("archives", []))
+                logger.info(f"Vault: {vault_id}")
+                logger.info(f"  Status: {status}")
+                logger.info(f"  Job ID: {job_id}")
+                logger.info(f"  Last Updated: {updated}")
+                logger.info(f"  Archives: {archive_count}")
+                logger.info("")
+
+        logger.info("Command completed")
 
     except Exception as e:
-        logger.error("An error occurred during cleanup: %s", str(e))
+        logger.error("An error occurred: %s", str(e))
         if args.debug:
             logger.exception("Detailed error information:")
         raise
