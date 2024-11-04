@@ -61,9 +61,6 @@ the script takes a number of parameters:
 
 ## examples
 
-* **Specify a custom log file**
-  `python deicer.py --log-file=/path/to/custom.log`
-* **Specify a directory for logs (will create timestamped files)**
-  `python deicer.py --log-dir=/path/to/logs`
-* **enable debug mode**:
-  `python deicer.py --debug --yes`
+* **Specify a custom log file**:  `python deicer.py --log-file=/path/to/custom.log`
+* **Specify a directory for logs (will create timestamped files)**:  `python deicer.py --log-dir=/path/to/logs`
+* **enable debug mode**:  `python deicer.py --debug --yes`
