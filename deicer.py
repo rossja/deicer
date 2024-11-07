@@ -254,11 +254,35 @@ class GlacierCleanup:
             self.state_manager.update_vault_job(vault_id, job_id, "error")
 
     def process_completed_jobs(self):
-        """Process vaults with completed inventory jobs older than 24 hours."""
+        """Process vaults with completed inventory jobs older than 24 hours or pending deletions."""
         current_time = datetime.now(timezone.utc)
 
-        for vault_id, vault_data in self.state_manager.state.items():
-            if vault_data["status"] == "complete" and vault_data["job_updated"]:
+        # Make a list of vault IDs to avoid modification during iteration
+        vault_ids = list(self.state_manager.state.keys())
+
+        for vault_id in vault_ids:
+            vault_data = self.state_manager.state.get(vault_id)
+            if not vault_data:
+                continue
+
+            if vault_data["status"] == "pending_deletion":
+                # For pending deletions, check if 24 hours have passed since last attempt
+                if vault_data["job_updated"]:
+                    job_time = datetime.fromisoformat(
+                        vault_data["job_updated"])
+                    hours_elapsed = (
+                        current_time - job_time).total_seconds() / 3600
+
+                    if hours_elapsed >= 24:
+                        logger.info(
+                            "Retrying deletion for vault %s after %.1f hours", vault_id, hours_elapsed)
+                        # Empty archives list since they should be deleted
+                        self.delete_vault_contents(vault_id, [])
+                    else:
+                        logger.info("Waiting for 24-hour period before retrying vault %s deletion (%.1f hours elapsed)",
+                                    vault_id, hours_elapsed)
+
+            elif vault_data["status"] == "complete" and vault_data["job_updated"]:
                 job_time = datetime.fromisoformat(vault_data["job_updated"])
                 hours_elapsed = (
                     current_time - job_time).total_seconds() / 3600
@@ -268,6 +292,9 @@ class GlacierCleanup:
                         "Processing vault %s (%.1f hours elapsed)", vault_id, hours_elapsed)
                     self.delete_vault_contents(
                         vault_id, vault_data["archives"])
+                else:
+                    logger.info("Waiting for 24-hour period before processing vault %s (%.1f hours elapsed)",
+                                vault_id, hours_elapsed)
 
     def delete_vault_contents(self, vault_id, archives):
         """Delete archives and attempt vault deletion."""
@@ -281,13 +308,36 @@ class GlacierCleanup:
                     logger.info("Deleted archive %s from vault %s",
                                 archive['id'], vault_id)
                 except ClientError as e:
-                    logger.error("Error deleting archive %s: %s",
-                                 archive['id'], str(e))
+                    if 'ResourceNotFoundException' in str(e):
+                        logger.info("Archive %s already deleted from vault %s",
+                                    archive['id'], vault_id)
+                    else:
+                        logger.error("Error deleting archive %s: %s",
+                                     archive['id'], str(e))
 
-            # After deleting archives, mark the vault for future deletion
-            self.state_manager.update_vault_job(
-                vault_id, None, "pending_deletion")
-            logger.info("Marked vault %s for deletion", vault_id)
+            # After deleting archives, attempt to delete the vault
+            try:
+                self.glacier.delete_vault(vaultName=vault_id)
+                logger.info("Successfully deleted vault %s", vault_id)
+                # Remove the vault from state since it's been deleted
+                if vault_id in self.state_manager.state:
+                    del self.state_manager.state[vault_id]
+                    self.state_manager.save_state()
+            except ClientError as e:
+                if 'ResourceNotFoundException' in str(e):
+                    logger.info("Vault %s already deleted", vault_id)
+                    if vault_id in self.state_manager.state:
+                        del self.state_manager.state[vault_id]
+                        self.state_manager.save_state()
+                elif 'InvalidParameterValueException' in str(e) and 'cannot be deleted until' in str(e):
+                    # Vault not empty or recent archive deletions, mark for pending deletion
+                    self.state_manager.update_vault_job(
+                        vault_id, None, "pending_deletion")
+                    logger.info(
+                        "Marked vault %s for deletion (waiting for archive deletions to complete)", vault_id)
+                else:
+                    logger.error("Error deleting vault %s: %s",
+                                 vault_id, str(e))
 
         except Exception as e:
             logger.error("Error processing vault %s: %s", vault_id, str(e))
